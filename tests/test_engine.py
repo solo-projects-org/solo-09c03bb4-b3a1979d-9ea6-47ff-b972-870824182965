@@ -303,3 +303,116 @@ def test_tickets_are_deduplicated_in_input_order():
     manifest, uploads = sample_inputs()
     result = run_check(manifest, uploads, [4242, 1003, 4242])
     assert [t.ticket for t in result.tickets] == [4242, 1003]
+
+
+def test_batch_scan_reads_only_row_groups_the_batch_requires(monkeypatch):
+    import checker.engine as engine
+
+    manifest, uploads = sample_inputs()
+    calls: list[tuple[str, int]] = []
+    original = engine._find_batch_matches
+
+    def counting(handle, row_group_index, *args, **kwargs):
+        calls.append((handle.entry.uploaded_filename, row_group_index))
+        return original(handle, row_group_index, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "_find_batch_matches", counting)
+    run_check(manifest, uploads, [4242, 1003, 4218, 8888, 9999])
+
+    # data-0001 row groups 1-3 exclude every ticket in the batch, so they are
+    # never read.  Row group 0 is needed by 1003 and row group 4 by 4218/4242.
+    # data-0002 has no statistics, so both its row groups are read once.
+    assert calls == [
+        ("data-0001.parquet", 0),
+        ("data-0001.parquet", 4),
+        ("data-0002.parquet", 0),
+        ("data-0002.parquet", 1),
+    ]
+
+
+def test_per_ticket_diagnostics_ignore_other_tickets_batch_reads():
+    manifest, uploads = sample_inputs()
+    result = run_check(manifest, uploads, [4242, 1003])
+
+    ticket_4242 = next(t for t in result.tickets if t.ticket == 4242)
+    scan = next(
+        s for s in ticket_4242.file_scans
+        if s.file_entry.uploaded_filename == "data-0001.parquet"
+    )
+    # Row group 0 was physically read for 1003, but statistics exclude 4242.
+    # It must still count as skipped for 4242, not as a required read.
+    assert scan.row_groups[0].batch_read
+    assert scan.row_groups[0].skipped
+    assert scan.skipped_count == 4
+    assert scan.read_count == 1
+    assert scan.row_groups[4].matched_rows == [99]
+
+    ticket_1003 = next(t for t in result.tickets if t.ticket == 1003)
+    scan_1003 = next(
+        s for s in ticket_1003.file_scans
+        if s.file_entry.uploaded_filename == "data-0001.parquet"
+    )
+    # Row group 4 was physically read for 4242/4218, but not for 1003.
+    assert scan_1003.row_groups[4].batch_read
+    assert scan_1003.row_groups[4].skipped
+    assert scan_1003.skipped_count == 4
+    assert scan_1003.read_count == 1
+    assert scan_1003.row_groups[0].matched_rows == [3]
+
+
+def test_batch_skip_requires_statistics_to_exclude_every_ticket(tmp_path: Path):
+    data_path = tmp_path / "data.parquet"
+    table = pa.table(
+        {"ticket_no": list(range(0, 10)) + list(range(100, 110))}
+    )
+    pq.write_table(table, data_path, row_group_size=10)
+    manifest = parse_manifest(
+        "original_path,uploaded_filename,file_type,data_sequence_number\n"
+        "s3://bucket/voyage/data/data.parquet,data.parquet,data,5\n"
+    )
+    result = run_check(
+        manifest, {"data.parquet": data_path}, [5, 105]
+    )
+
+    # Each row group contains one of the two tickets, so neither may be
+    # skipped for the batch.
+    assert all(rg.batch_read for rg in result.file_scans[0].row_groups)
+
+    by_ticket = {t.ticket: t for t in result.tickets}
+    assert by_ticket[5].file_scans[0].row_groups[1].skipped
+    assert not by_ticket[5].file_scans[0].row_groups[0].skipped
+    assert by_ticket[105].file_scans[0].row_groups[0].skipped
+    assert not by_ticket[105].file_scans[0].row_groups[1].skipped
+
+
+def test_batch_skip_handles_tickets_outside_stats_on_both_sides(tmp_path: Path):
+    data_path = tmp_path / "data.parquet"
+    table = pa.table({"ticket_no": list(range(100, 120))})
+    pq.write_table(table, data_path, row_group_size=10)
+    manifest = parse_manifest(
+        "original_path,uploaded_filename,file_type,data_sequence_number\n"
+        "s3://bucket/voyage/data/data.parquet,data.parquet,data,5\n"
+    )
+    # Tickets 50 and 250 both lie outside every stats range; the stats range
+    # sits between them, so a naive [min, max] envelope test would wrongly
+    # read the row groups.
+    result = run_check(
+        manifest, {"data.parquet": data_path}, [50, 250]
+    )
+    assert all(not rg.batch_read for rg in result.file_scans[0].row_groups)
+    assert all(not ticket.found for ticket in result.tickets)
+
+
+def test_shared_row_group_metadata_is_ticket_independent():
+    manifest, uploads = sample_inputs()
+    result = run_check(manifest, uploads, [4242, 1003])
+
+    assert [f.file_entry.uploaded_filename for f in result.file_scans] == [
+        "data-0001.parquet",
+        "data-0002.parquet",
+    ]
+    # Ticket results point at the same shared metadata; they do not each
+    # carry their own copy of row-group statistics.
+    for ticket in result.tickets:
+        assert ticket._shared_scans is result.file_scans
+

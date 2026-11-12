@@ -288,6 +288,7 @@ tbody tr.row-present { background: #fbfefd; }
 .scan-summary { color: var(--muted); font-size: 12px; }
 .scan-details[open] summary { border-bottom: 1px solid var(--line); }
 .scan-details .table-wrap { border: 0; border-radius: 0; }
+.scan-placeholder { margin: 0; padding: 10px 12px; font-size: 12.5px; }
 tbody tr.rg-skipped { background: #fffdf7; }
 tbody tr.rg-read { background: #ffffff; }
 .num-range { font-family: var(--mono); font-size: 12px; white-space: nowrap; }

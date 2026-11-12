@@ -65,6 +65,36 @@ def test_sample_shows_skipped_row_groups_and_deleted_ticket(client):
     assert "delete-pos-stale-0001.parquet" in html
 
 
+def test_sample_sends_one_shared_metadata_blob_and_lazy_diagnostics(client):
+    import json
+    import re
+
+    response = client.get("/sample")
+    html = response.get_data(as_text=True)
+
+    # Exactly one shared row-group metadata payload, not one per ticket.
+    assert html.count('id="row-group-metadata"') == 1
+    match = re.search(
+        r'<script type="application/json" id="row-group-metadata">'
+        r"(.+?)</script>",
+        html,
+        re.S,
+    )
+    assert match is not None
+    metadata = json.loads(match.group(1))
+    assert [
+        file["uploaded_filename"] for file in metadata["files"]
+    ] == ["data-0001.parquet", "data-0002.parquet"]
+    assert not any("tickets" in file for file in metadata["files"])
+
+    # Diagnostic tables are generated in the browser on expansion.  The
+    # initial response contains the shared metadata only.
+    assert 'class="scan-table"' not in html
+    assert html.count('class="scan-details"') == 10
+    assert "不会重读 Parquet" in html
+
+
+
 def test_upload_round_trip(client):
     manifest, files = sample_uploads()
     response = client.post(

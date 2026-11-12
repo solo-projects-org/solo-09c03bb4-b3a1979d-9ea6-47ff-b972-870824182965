@@ -3,8 +3,9 @@
 The sample deliberately contains:
 
 * data-0001.parquet: five row groups.  Ticket 4242 lives in row group 4
-  (zero-based), so row groups 0-3 are skipped by min/max statistics before
-  the ticket is found.
+  (zero-based), so for a 4242-only check row groups 0-3 are skipped by
+  min/max statistics.  With the bundled batch, row groups 0 and 4 are read
+  once each (for 1003 / 4218+4242) and 1-3 are skipped for the whole batch.
 * data-0002.parquet: written without column statistics.  Ticket 8888 is in
   its second row group and the checker must read both row groups because the
   statistics are missing.

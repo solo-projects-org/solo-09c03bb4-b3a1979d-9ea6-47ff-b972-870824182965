@@ -36,6 +36,7 @@
   {% endif %}
 
   {% if result %}
+  <script type="application/json" id="row-group-metadata">{{ result.shared_row_group_metadata|tojson }}</script>
   <section class="summary">
     <div class="summary-title">
       <div>
@@ -59,9 +60,12 @@
     </div>
     {% if source == 'sample' %}
     <p class="notice">
-      样例中票号 <code>4242</code> 位于 <code>data-0001.parquet</code> 的第 5 个行组：
-      前 4 个行组被统计范围排除并跳过；仍按原始全局行号 <code>99</code> 命中了删除记录。
-      票号 <code>8888</code> 所在文件没有行组统计，因此逐组读取后同样命中删除记录。
+      样例一次核对 5 个票号。<code>data-0001.parquet</code> 只有第 0、4 行组
+      无法被统计排除整批票号，因此各读取一次；第 1–3 行组跳过。
+      <code>data-0002.parquet</code> 没有行组统计，两个行组各读取一次。
+      逐票诊断在展开时按当前票号重新判断：例如 <code>4242</code> 的前 4 个行组
+      虽为 <code>1003</code> 在批量扫描中读取过，对 <code>4242</code> 仍标记为
+      “跳过”，不算作本票必读。全局行号与删除依据保持不变。
     </p>
     {% endif %}
   </section>
@@ -162,62 +166,22 @@
       </div>
       {% endif %}
 
-      <div class="scan-section">
+      <div class="scan-section"
+           data-ticket="{{ t.ticket }}"
+           data-matches='{{ t.matches_by_file|tojson }}'>
         <h4>行组跳读诊断</h4>
-        {% for scan in t.file_scans %}
-        <details class="scan-details" {% if source == 'sample' %}open{% endif %}>
+        {% for summary in t.file_summaries %}
+        <details class="scan-details"
+                 data-file-index="{{ loop.index0 }}">
           <summary>
-            <span class="mono">{{ scan.file_entry.uploaded_filename }}</span>
+            <span class="mono">{{ summary.file_entry.uploaded_filename }}</span>
             <span class="scan-summary">
-              跳过 {{ scan.skipped_count }} / {{ scan.row_groups|length }} 个行组 ·
-              读取 {{ scan.read_count }} 个
+              跳过 {{ summary.skipped_row_groups }} / {{ summary.total_row_groups }} 个行组 ·
+              读取 {{ summary.read_row_groups }} 个
             </span>
           </summary>
-          <div class="table-wrap">
-            <table class="scan-table">
-              <thead>
-                <tr>
-                  <th>行组</th>
-                  <th>全局行范围</th>
-                  <th>票号统计 min / max</th>
-                  <th>动作</th>
-                  <th>命中行号</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for rg in scan.row_groups %}
-                <tr class="{% if rg.skipped %}rg-skipped{% else %}rg-read{% endif %}">
-                  <td>行组 {{ rg.row_group_index }}</td>
-                  <td class="num-range">
-                    {{ rg.start_row }} – {{ rg.start_row + rg.num_rows - 1 if rg.num_rows else rg.start_row }}<br>
-                    <small>{{ rg.num_rows }} 行</small>
-                  </td>
-                  <td>
-                    {% if rg.stats_present %}
-                      <code>{{ rg.stats_min }} / {{ rg.stats_max }}</code>
-                    {% else %}
-                      <span class="subtle">缺失统计</span>
-                    {% endif %}
-                  </td>
-                  <td>
-                    {% if rg.skipped %}
-                      <span class="pill skipped">跳过</span>
-                    {% else %}
-                      <span class="pill read">读取</span>
-                    {% endif %}
-                    <small class="reason">{{ rg.reason }}</small>
-                  </td>
-                  <td>
-                    {% if rg.matched_rows %}
-                      {% for row in rg.matched_rows %}<span class="row-hit">{{ row }}</span>{% endfor %}
-                    {% else %}
-                      <span class="subtle">—</span>
-                    {% endif %}
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
+          <div class="scan-body">
+            <p class="scan-placeholder subtle">展开后按票号 {{ t.ticket }} 生成诊断，不会重读 Parquet。</p>
           </div>
         </details>
         {% endfor %}
@@ -325,9 +289,177 @@
     <p>
       位置删除匹配条件：删除记录的 <code>file_path</code> 等于原始路径、
       <code>pos</code> 等于从 0 起算的文件内行号，且删除文件的数据序列号不小于数据文件。
+      批量扫描只在统计排除整批票号时跳过行组，其余行组的票号列只读取一次；
+      逐票诊断展开时使用共享元数据，不会重读 Parquet。
       缺失副本或任一读取失败都会中止整次核对。
     </p>
   </div>
 </footer>
+<script>
+(function () {
+  "use strict";
+
+  var metaTag = document.getElementById("row-group-metadata");
+  if (!metaTag) return;
+
+  var metadata = JSON.parse(metaTag.textContent);
+  var files = metadata.files || [];
+
+  function statMin(rg) {
+    return rg.stats_min_text != null ? rg.stats_min_text : rg.stats_min;
+  }
+
+  function statMax(rg) {
+    return rg.stats_max_text != null ? rg.stats_max_text : rg.stats_max;
+  }
+
+  function reasonText(rg, ticket, skipped) {
+    if (skipped) {
+      var text = "统计范围 [" + statMin(rg) + ", " + statMax(rg) +
+        "] 不含票号 " + ticket;
+      if (rg.batch_read) {
+        text += "（本票可跳过；批量扫描为其他票号读取）";
+      }
+      return text;
+    }
+    if (rg.stats_present) {
+      return "统计范围 [" + statMin(rg) + ", " + statMax(rg) +
+        "] 含票号 " + ticket + "，读取行组";
+    }
+    return "缺失行组统计，读取行组";
+  }
+
+  function buildDiagnostics(details) {
+    if (details.dataset.loaded === "1") return;
+
+    var section = details.closest(".scan-section");
+    var ticketText = section.dataset.ticket;
+    var ticketBig = BigInt(ticketText.replace(/^\+/, ""));
+    var fileIndex = Number(details.dataset.fileIndex);
+    var file = files[fileIndex];
+    if (!file) return;
+
+    var matches = {};
+    try {
+      matches = JSON.parse(section.dataset.matches || "{}");
+    } catch (err) {
+      matches = {};
+    }
+    var fileMatches = matches[file.uploaded_filename] || [];
+
+    var wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    var table = document.createElement("table");
+    table.className = "scan-table";
+
+    var thead = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    ["行组", "全局行范围", "票号统计 min / max", "动作", "命中行号"]
+      .forEach(function (label) {
+        var th = document.createElement("th");
+        th.textContent = label;
+        headRow.appendChild(th);
+      });
+    thead.appendChild(headRow);
+
+    var tbody = document.createElement("tbody");
+    (file.row_groups || []).forEach(function (rg) {
+      var skipped = false;
+      if (rg.stats_present) {
+        var minText = statMin(rg);
+        var maxText = statMax(rg);
+        if (minText != null && maxText != null) {
+          var minBig = BigInt(String(minText));
+          var maxBig = BigInt(String(maxText));
+          skipped = ticketBig < minBig || ticketBig > maxBig;
+        }
+      }
+      var rowMatches = fileMatches.filter(function (rowIndex) {
+        return rowIndex >= rg.start_row &&
+          rowIndex < rg.start_row + rg.num_rows;
+      });
+
+      var tr = document.createElement("tr");
+      tr.className = skipped ? "rg-skipped" : "rg-read";
+
+      var td = document.createElement("td");
+      td.textContent = "行组 " + rg.index;
+      tr.appendChild(td);
+
+      td = document.createElement("td");
+      td.className = "num-range";
+      var last = rg.num_rows
+        ? rg.start_row + rg.num_rows - 1
+        : rg.start_row;
+      td.appendChild(document.createTextNode(rg.start_row + " – " + last));
+      td.appendChild(document.createElement("br"));
+      var small = document.createElement("small");
+      small.textContent = rg.num_rows + " 行";
+      td.appendChild(small);
+      tr.appendChild(td);
+
+      td = document.createElement("td");
+      if (rg.stats_present) {
+        var code = document.createElement("code");
+        code.textContent = statMin(rg) + " / " + statMax(rg);
+        td.appendChild(code);
+      } else {
+        var missing = document.createElement("span");
+        missing.className = "subtle";
+        missing.textContent = "缺失统计";
+        td.appendChild(missing);
+      }
+      tr.appendChild(td);
+
+      td = document.createElement("td");
+      var pill = document.createElement("span");
+      pill.className = "pill " + (skipped ? "skipped" : "read");
+      pill.textContent = skipped ? "跳过" : "读取";
+      td.appendChild(pill);
+      var reason = document.createElement("small");
+      reason.className = "reason";
+      reason.textContent = reasonText(rg, ticketText, skipped);
+      td.appendChild(reason);
+      tr.appendChild(td);
+
+      td = document.createElement("td");
+      if (rowMatches.length) {
+        rowMatches.forEach(function (rowIndex) {
+          var hit = document.createElement("span");
+          hit.className = "row-hit";
+          hit.textContent = rowIndex;
+          td.appendChild(hit);
+        });
+      } else {
+        var dash = document.createElement("span");
+        dash.className = "subtle";
+        dash.textContent = "—";
+        td.appendChild(dash);
+      }
+      tr.appendChild(td);
+
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+
+    var body = details.querySelector(".scan-body");
+    body.replaceChildren(wrap);
+    details.dataset.loaded = "1";
+  }
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".scan-details"),
+    function (details) {
+      details.addEventListener("toggle", function () {
+        if (details.open) buildDiagnostics(details);
+      });
+      if (details.open) buildDiagnostics(details);
+    }
+  );
+})();
+</script>
 </body>
 </html>
