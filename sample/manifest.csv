@@ -1,0 +1,7 @@
+original_path,uploaded_filename,file_type,data_sequence_number
+s3://ferry-lake/warehouse/settlement/voyage_date=2026-11-05/data/data-0001.parquet,data-0001.parquet,data,7
+s3://ferry-lake/warehouse/settlement/voyage_date=2026-11-05/data/data-0002.parquet,data-0002.parquet,data,7
+s3://ferry-lake/warehouse/settlement/voyage_date=2026-11-05/delete-pos/delete-pos-0001.parquet,delete-pos-0001.parquet,position_delete,12
+s3://ferry-lake/warehouse/settlement/voyage_date=2026-11-05/delete-pos/delete-pos-0002.parquet,delete-pos-0002.parquet,position_delete,8
+s3://ferry-lake/warehouse/settlement/voyage_date=2026-11-05/delete-pos/delete-pos-stale-0001.parquet,delete-pos-stale-0001.parquet,position_delete,6
+s3://ferry-lake/warehouse/settlement/voyage_date=2026-11-05/delete-eq/delete-eq-0001.parquet,delete-eq-0001.parquet,equality_delete,12

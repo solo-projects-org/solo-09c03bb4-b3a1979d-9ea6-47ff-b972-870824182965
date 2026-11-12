@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>渡轮结算 · Iceberg 票号删除核对</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">⛴</span>
+      <div>
+        <h1>渡轮结算 · 票号删除核对</h1>
+        <p>Iceberg v2 源快照 · 仅位置删除（positional deletes）</p>
+      </div>
+    </div>
+    <a class="button ghost" href="{{ url_for('sample') }}">载入样例</a>
+  </div>
+</header>
+
+<main class="wrap">
+  {% if error %}
+  <section class="alert" role="alert">
+    <h2>核对未完成</h2>
+    <p>{{ error.message }}</p>
+    {% if error.files %}
+    <p class="alert-files">涉及文件：</p>
+    <ul class="file-list">
+      {% for file in error.files %}<li class="mono">{{ file }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    <p class="hint">为避免部分结论，本次没有返回任何票号的核对结果。</p>
+  </section>
+  {% endif %}
+
+  {% if result %}
+  <section class="summary">
+    <div class="summary-title">
+      <div>
+        <h2>核对结果</h2>
+        <p class="subtle">
+          清单 {{ result.manifest.entries|length }} 项 ·
+          数据文件 {{ result.data_files|length }} 个 ·
+          位置删除文件 {{ result.position_delete_files|length }} 个 ·
+          忽略的等值删除 {{ result.equality_delete_files|length }} 个
+        </p>
+      </div>
+      {% if source == 'sample' %}
+      <span class="badge sample">内置样例</span>
+      {% endif %}
+    </div>
+    <div class="chips">
+      <span class="chip"><b>{{ result.tickets|length }}</b> 个票号</span>
+      <span class="chip"><b>{{ result.found_count }}</b> 在数据文件中找到</span>
+      <span class="chip danger"><b>{{ result.deleted_count }}</b> 判定为已删除</span>
+      <span class="chip">票号列 <code>{{ result.ticket_column }}</code></span>
+    </div>
+    {% if source == 'sample' %}
+    <p class="notice">
+      样例中票号 <code>4242</code> 位于 <code>data-0001.parquet</code> 的第 5 个行组：
+      前 4 个行组被统计范围排除并跳过；仍按原始全局行号 <code>99</code> 命中了删除记录。
+      票号 <code>8888</code> 所在文件没有行组统计，因此逐组读取后同样命中删除记录。
+    </p>
+    {% endif %}
+  </section>
+
+  <section class="ticket-list" aria-label="逐票核对结果">
+    {% for t in result.tickets %}
+    <article class="ticket-card {% if t.deleted %}is-deleted{% elif t.found %}is-present{% else %}is-missing{% endif %}">
+      <div class="ticket-head">
+        <div class="ticket-id">
+          <span class="eyebrow">票号</span>
+          <span class="ticket-no">{{ t.ticket }}</span>
+        </div>
+        <div class="ticket-status">
+          {% if not t.found %}
+          <span class="badge neutral">未找到</span>
+          {% elif t.deleted %}
+          <span class="badge danger">已删除</span>
+          {% else %}
+          <span class="badge ok">存在 · 未删除</span>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if t.occurrences %}
+      <div class="table-wrap">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th>原文件</th>
+              <th>文件内行号<br><small>从 0 起算</small></th>
+              <th>行组</th>
+              <th>是否已删</th>
+              <th>命中的删除文件</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for occ in t.occurrences %}
+            <tr class="{% if occ.deleted %}row-deleted{% else %}row-present{% endif %}">
+              <td class="mono path">
+                {{ occ.file_entry.original_path }}
+                <small>
+                  副本 <code>{{ occ.file_entry.uploaded_filename }}</code>
+                  · 数据序列号 {{ occ.file_entry.sequence_number }}
+                </small>
+              </td>
+              <td class="row-index">{{ occ.row_index }}</td>
+              <td class="row-group">
+                <b>行组 {{ occ.row_group_index }}</b>
+                <small>全局起点 {{ occ.row_group_start }} · 组内第 {{ occ.local_row_index }} 行</small>
+              </td>
+              <td>
+                {% if occ.deleted %}
+                <span class="pill deleted">已删除</span>
+                {% else %}
+                <span class="pill present">未删除</span>
+                {% endif %}
+              </td>
+              <td class="delete-cell">
+                {% if occ.matched_deletes %}
+                  {% for match in occ.matched_deletes %}
+                  <div class="delete-hit">
+                    <span class="mono">{{ match.entry.original_path }}</span>
+                    <small>
+                      上传文件名 <code>{{ match.entry.uploaded_filename }}</code>
+                      · 数据序列号 {{ match.entry.sequence_number }}
+                      · 删除文件第 {{ match.source_row }} 行（从 0 起算）
+                    </small>
+                  </div>
+                  {% endfor %}
+                {% else %}
+                  <span class="subtle">没有路径、行号与序列号都匹配的删除记录</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty">在全部 {{ result.data_files|length }} 个数据文件中未找到该票号。</p>
+      {% endif %}
+
+      {% if t.ignored_deletes %}
+      <div class="ignored-box">
+        <h4>被规则忽略的删除记录</h4>
+        <ul>
+          {% for ignored in t.ignored_deletes %}
+          <li>
+            <span class="mono">{{ ignored.record.entry.original_path }}</span>
+            <small>
+              上传文件名 {{ ignored.record.entry.uploaded_filename }} ·
+              删除文件第 {{ ignored.record.source_row }} 行 ·
+              {{ ignored.reason }}
+            </small>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      <div class="scan-section">
+        <h4>行组跳读诊断</h4>
+        {% for scan in t.file_scans %}
+        <details class="scan-details" {% if source == 'sample' %}open{% endif %}>
+          <summary>
+            <span class="mono">{{ scan.file_entry.uploaded_filename }}</span>
+            <span class="scan-summary">
+              跳过 {{ scan.skipped_count }} / {{ scan.row_groups|length }} 个行组 ·
+              读取 {{ scan.read_count }} 个
+            </span>
+          </summary>
+          <div class="table-wrap">
+            <table class="scan-table">
+              <thead>
+                <tr>
+                  <th>行组</th>
+                  <th>全局行范围</th>
+                  <th>票号统计 min / max</th>
+                  <th>动作</th>
+                  <th>命中行号</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for rg in scan.row_groups %}
+                <tr class="{% if rg.skipped %}rg-skipped{% else %}rg-read{% endif %}">
+                  <td>行组 {{ rg.row_group_index }}</td>
+                  <td class="num-range">
+                    {{ rg.start_row }} – {{ rg.start_row + rg.num_rows - 1 if rg.num_rows else rg.start_row }}<br>
+                    <small>{{ rg.num_rows }} 行</small>
+                  </td>
+                  <td>
+                    {% if rg.stats_present %}
+                      <code>{{ rg.stats_min }} / {{ rg.stats_max }}</code>
+                    {% else %}
+                      <span class="subtle">缺失统计</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if rg.skipped %}
+                      <span class="pill skipped">跳过</span>
+                    {% else %}
+                      <span class="pill read">读取</span>
+                    {% endif %}
+                    <small class="reason">{{ rg.reason }}</small>
+                  </td>
+                  <td>
+                    {% if rg.matched_rows %}
+                      {% for row in rg.matched_rows %}<span class="row-hit">{{ row }}</span>{% endfor %}
+                    {% else %}
+                      <span class="subtle">—</span>
+                    {% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+
+  <section class="card manifest-card">
+    <div class="card-head">
+      <h2>文件清单</h2>
+      <p class="subtle">仅 data 与 position_delete 参与核对；equality_delete 一律忽略。</p>
+    </div>
+    <div class="table-wrap">
+      <table class="manifest-table">
+        <thead>
+          <tr>
+            <th>类型</th>
+            <th>原始路径</th>
+            <th>上传文件名</th>
+            <th>数据序列号</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in result.manifest_rows %}
+          <tr class="{% if row.entry.kind.value == 'equality_delete' %}manifest-ignored{% endif %}">
+            <td><span class="kind kind-{{ row.entry.kind.value }}">{{ row.entry.kind.value }}</span></td>
+            <td class="mono path">{{ row.entry.original_path }}</td>
+            <td class="mono">{{ row.entry.uploaded_filename }}</td>
+            <td class="row-index">{{ row.entry.sequence_number }}</td>
+            <td>
+              {% if row.note %}
+                <span class="subtle">{{ row.note }}</span>
+              {% elif row.uploaded %}
+                <span class="pill present">已上传</span>
+              {% else %}
+                <span class="pill deleted">缺失</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if result.warnings %}
+    <ul class="warnings">
+      {% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section class="card form-card">
+    <div class="card-head">
+      <h2>上传并核对</h2>
+      <p class="subtle">
+        同一航次日分区的 Iceberg v2 有效文件清单，以及清单中每个 data /
+        position_delete 文件的 Parquet 副本。
+      </p>
+    </div>
+    <form method="post" action="{{ url_for('check') }}" enctype="multipart/form-data">
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">有效文件清单 <small>CSV 或 JSON</small></span>
+          <input type="file" name="manifest" accept=".csv,.json,text/csv,application/json" required>
+          <span class="field-hint">
+            列：<code>original_path</code>、<code>uploaded_filename</code>、
+            <code>file_type</code>、<code>data_sequence_number</code>
+          </span>
+        </label>
+        <label class="field">
+          <span class="field-label">Parquet 副本 <small>可多选</small></span>
+          <input type="file" name="files" accept=".parquet,application/octet-stream" multiple>
+          <span class="field-hint">
+            文件类型：<code>data</code>、<code>position_delete</code>、
+            <code>equality_delete</code>（忽略）
+          </span>
+        </label>
+      </div>
+
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">整数票号 <small>逗号、空格或换行分隔</small></span>
+          <textarea name="tickets" rows="3" placeholder="4242, 1003, 4218">{{ tickets_text }}</textarea>
+        </label>
+        <label class="field narrow">
+          <span class="field-label">票号列名</span>
+          <input type="text" name="ticket_column" value="{{ ticket_column or 'ticket_no' }}">
+          <span class="field-hint">Parquet 中整数票号列的名称</span>
+        </label>
+      </div>
+
+      <div class="form-actions">
+        <button class="button primary" type="submit">开始核对</button>
+        <a class="button ghost" href="{{ url_for('sample') }}">载入内置样例（演示跳过前面的行组）</a>
+        <span class="subtle limit">单次上传上限 {{ max_upload_mb }} MB</span>
+      </div>
+    </form>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p>
+      位置删除匹配条件：删除记录的 <code>file_path</code> 等于原始路径、
+      <code>pos</code> 等于从 0 起算的文件内行号，且删除文件的数据序列号不小于数据文件。
+      缺失副本或任一读取失败都会中止整次核对。
+    </p>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,10 @@
+services:
+  ferry-iceberg-check:
+    build: .
+    image: ferry-iceberg-check:latest
+    init: true
+    ports:
+      - "8000:8000"
+    environment:
+      MAX_UPLOAD_MB: "512"
+    restart: unless-stopped
